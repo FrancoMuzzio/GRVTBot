@@ -1,7 +1,7 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { Toaster } from 'sonner';
+import { Toaster, toast } from 'sonner';
 import { AuthProvider } from './lib/auth-context';
 import { AppShell } from './components/layout/app-shell';
 import { ProtectedRoute } from './components/protected-route';
@@ -28,6 +28,14 @@ function RouteFallback() {
   );
 }
 
+// E.7: global error handler — surfaces network failures as a toast
+// so the user knows something is wrong instead of staring at stale data.
+// Individual mutation onError handlers still fire for specific error messages;
+// this catches the background query refetch failures that would otherwise
+// be silent.
+let lastNetworkToastAt = 0;
+const NETWORK_TOAST_COOLDOWN = 10_000; // don't spam
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -35,10 +43,38 @@ const queryClient = new QueryClient({
       refetchOnWindowFocus: false,
       retry: 1,
     },
+    mutations: {
+      onError: (err) => {
+        // Mutations already show their own toast in onError handlers,
+        // but this catches any that forget to.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('network error') && Date.now() - lastNetworkToastAt > NETWORK_TOAST_COOLDOWN) {
+          lastNetworkToastAt = Date.now();
+          toast.error('Network error — check your connection', { id: 'network-error' });
+        }
+      },
+    },
   },
 });
 
 export default function App() {
+  // E.7: show a persistent toast when the browser goes offline,
+  // dismiss when back online. Simple and covers WiFi drops, VPN
+  // disconnects, etc.
+  useEffect(() => {
+    const onOffline = () => toast.error('You are offline', { id: 'offline', duration: Infinity });
+    const onOnline = () => {
+      toast.dismiss('offline');
+      toast.success('Back online', { id: 'online', duration: 3000 });
+    };
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('online', onOnline);
+    };
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>

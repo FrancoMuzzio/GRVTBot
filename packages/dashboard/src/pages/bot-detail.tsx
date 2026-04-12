@@ -142,37 +142,66 @@ export function BotDetailPage() {
   // the hook count went from N (loading) to N+3 (loaded) and React blew
   // up the render with "rendered more hooks than during the previous
   // render". The fix is to declare every hook unconditionally up here.
-  const startMutation = useMutation({
-    mutationFn: () => api.startBot(botId),
-    onSuccess: () => {
-      toast.success(`Bot ${botId} started`);
+  // E.3: optimistic UI updates — the bot status changes instantly in the
+  // cache when the user confirms an action, then the server response
+  // reconciles. On error we rollback to the previous state. This removes
+  // the "click → wait 2-5s → see change" lag that made the UI feel broken.
+
+  const optimisticBotUpdate = (newStatus: string) => ({
+    async onMutate() {
+      // Cancel in-flight refetches so they don't overwrite our optimistic value
+      await queryClient.cancelQueries({ queryKey: ['bot', botId] });
+      await queryClient.cancelQueries({ queryKey: ['bots'] });
+      // Snapshot for rollback
+      const prevBot = queryClient.getQueryData(['bot', botId]);
+      const prevBots = queryClient.getQueryData(['bots']);
+      // Optimistically update the single-bot cache
+      queryClient.setQueryData(['bot', botId], (old: any) =>
+        old ? { ...old, bot: { ...old.bot, status: newStatus } } : old
+      );
+      // Optimistically update the bots list cache
+      queryClient.setQueryData(['bots'], (old: any) =>
+        old
+          ? {
+              ...old,
+              bots: old.bots.map((b: any) =>
+                b.id === botId ? { ...b, status: newStatus } : b
+              ),
+            }
+          : old
+      );
+      return { prevBot, prevBots };
+    },
+    onError(_err: Error, _vars: void, ctx: { prevBot?: unknown; prevBots?: unknown } | undefined) {
+      // Rollback on failure
+      if (ctx?.prevBot) queryClient.setQueryData(['bot', botId], ctx.prevBot);
+      if (ctx?.prevBots) queryClient.setQueryData(['bots'], ctx.prevBots);
+      toast.error(`Action failed: ${_err.message}`);
+    },
+    onSettled() {
+      // Always refetch after settled to get the real server state
       void queryClient.invalidateQueries({ queryKey: ['bot', botId] });
       void queryClient.invalidateQueries({ queryKey: ['bots'] });
       void queryClient.invalidateQueries({ queryKey: ['gridState', botId] });
     },
-    onError: (err: Error) => toast.error(`Start failed: ${err.message}`),
+  });
+
+  const startMutation = useMutation({
+    mutationFn: () => api.startBot(botId),
+    ...optimisticBotUpdate('running'),
+    onSuccess: () => toast.success(`Bot ${botId} started`),
   });
 
   const pauseMutation = useMutation({
     mutationFn: () => api.pauseBot(botId),
-    onSuccess: () => {
-      toast.success(`Bot ${botId} paused (orders cancelled on GRVT)`);
-      void queryClient.invalidateQueries({ queryKey: ['bot', botId] });
-      void queryClient.invalidateQueries({ queryKey: ['bots'] });
-      void queryClient.invalidateQueries({ queryKey: ['gridState', botId] });
-    },
-    onError: (err: Error) => toast.error(`Pause failed: ${err.message}`),
+    ...optimisticBotUpdate('paused'),
+    onSuccess: () => toast.success(`Bot ${botId} paused`),
   });
 
   const closeMutation = useMutation({
     mutationFn: () => api.closeBot(botId),
-    onSuccess: () => {
-      toast.success(`Bot ${botId} closed (orders cancelled, position closed)`);
-      void queryClient.invalidateQueries({ queryKey: ['bot', botId] });
-      void queryClient.invalidateQueries({ queryKey: ['bots'] });
-      void queryClient.invalidateQueries({ queryKey: ['gridState', botId] });
-    },
-    onError: (err: Error) => toast.error(`Close failed: ${err.message}`),
+    ...optimisticBotUpdate('stopped'),
+    onSuccess: () => toast.success(`Bot ${botId} closed`),
   });
 
   const confirm = useConfirm();
