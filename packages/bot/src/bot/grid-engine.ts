@@ -2,7 +2,7 @@
 // Lógica completa de grid trading con safeguards para dinero real
 
 import { grvtClient, type GRVTClient, getInstrumentSpec } from '../api/client.js';
-import { getGrvtClientForUser, invalidateGrvtClient } from '../api/grvt-client-factory.js';
+import { getGrvtClientForBot, invalidateGrvtClient } from '../api/grvt-client-factory.js';
 import { db } from '../database/db.js';
 import type { GridBot, GridLevel, OrderRecord } from '../database/db.js';
 import { childLogger } from '../server/logger.js';
@@ -28,6 +28,9 @@ export interface GridConfig {
   // only). Rotation happens automatically as price moves.
   virtualEnabled?: boolean;
   activeWindowSize?: number;
+  // H.5: route this bot through a specific sub-account. NULL/undefined
+  // = use the user's default credentials in grvt_credentials.
+  grvtSubAccountId?: number | null;
 }
 
 export interface GridCalculation {
@@ -214,11 +217,19 @@ export class GridEngine extends EventEmitter {
    * cheap after the first resolve.
    */
   private async getClientForBot(
-    bot: { id?: number; user_id?: number | null | undefined }
+    bot: {
+      id?: number;
+      user_id?: number | null | undefined;
+      grvt_sub_account_id?: number | null;
+    }
   ): Promise<GRVTClient> {
     if (bot.user_id != null) {
       try {
-        return await getGrvtClientForUser(bot.user_id, db as any);
+        return await getGrvtClientForBot(
+          bot.user_id,
+          bot.grvt_sub_account_id ?? null,
+          db as any
+        );
       } catch (err) {
         log.warn(
           `⚠️  Per-user GRVT client lookup failed for user ${bot.user_id} (bot ${bot.id ?? '?'}): ${(err as Error).message}. Falling back to singleton.`
@@ -229,26 +240,42 @@ export class GridEngine extends EventEmitter {
   }
 
   /**
-   * Drop any cached per-user GRVT client and replace the injected
-   * reference on every running GridBotInstance owned by that user.
-   * Call this after a user rotates their credentials so the next
-   * tick uses the fresh keys instead of the stale cookie session.
+   * Drop the cached GRVT client for one (user, sub-account) tuple and
+   * rebind the live instance on any running bot that uses it. Call
+   * this after credentials rotate. With subAccountId omitted (the
+   * default-creds path), every cache entry for the user is dropped
+   * and every bot belonging to the user gets refreshed.
    */
-  async rebindGrvtClient(userId: number): Promise<void> {
-    invalidateGrvtClient(userId);
+  async rebindGrvtClient(
+    userId: number,
+    subAccountId?: number | null
+  ): Promise<void> {
+    invalidateGrvtClient(userId, subAccountId);
     const affected: number[] = [];
     for (const [botId, instance] of this.bots) {
       const bot = instance.getBot();
-      if (bot.user_id === userId) {
-        try {
-          const fresh = await getGrvtClientForUser(userId, db as any);
-          instance.rebindClient(fresh);
-          affected.push(botId);
-        } catch (err) {
-          log.warn(
-            `⚠️  rebindGrvtClient: failed to refresh client for bot ${botId}: ${(err as Error).message}`
-          );
-        }
+      if (bot.user_id !== userId) continue;
+      // If a specific sub-account was given, only rebind bots that
+      // route through it. undefined = "all bots for this user" (used
+      // by default-creds rotation).
+      if (
+        subAccountId !== undefined &&
+        (bot.grvt_sub_account_id ?? null) !== subAccountId
+      ) {
+        continue;
+      }
+      try {
+        const fresh = await getGrvtClientForBot(
+          userId,
+          bot.grvt_sub_account_id ?? null,
+          db as any
+        );
+        instance.rebindClient(fresh);
+        affected.push(botId);
+      } catch (err) {
+        log.warn(
+          `⚠️  rebindGrvtClient: failed to refresh client for bot ${botId}: ${(err as Error).message}`
+        );
       }
     }
     if (affected.length > 0) {
@@ -476,6 +503,7 @@ export class GridEngine extends EventEmitter {
         liquidation_price: calculation.liquidationPrice,
         virtual_enabled: virtualEnabled ? 1 : 0,
         active_window_size: activeWindowSize,
+        grvt_sub_account_id: config.grvtSubAccountId ?? null,
         params_json: JSON.stringify({
           spacing: calculation.spacing,
           quantityPerGrid: calculation.quantityPerGrid,

@@ -73,6 +73,10 @@ export interface GridBot {
   // H.8: Virtual grids
   virtual_enabled?: number;
   active_window_size?: number | null;
+  // H.5: optional FK into grvt_sub_accounts. NULL = use the user's
+  // default credentials in grvt_credentials. Non-null routes the
+  // engine through that specific sub-account's encrypted creds.
+  grvt_sub_account_id?: number | null;
 }
 
 export interface GridLevel {
@@ -372,6 +376,12 @@ export class GridBotDB {
       // by keeping only the N closest to market active; rotate as price moves.
       'virtual_enabled INTEGER DEFAULT 0',
       'active_window_size INTEGER',
+      // H.5: optional FK to grvt_sub_accounts. NULL = use default
+      // credentials. We can't add a real FK constraint via ALTER in
+      // SQLite, but the column lives alongside the table and the
+      // application-layer guards (delete blocked when bots reference)
+      // keep referential integrity.
+      'grvt_sub_account_id INTEGER',
     ]) {
       try { await this.dbRun(`ALTER TABLE grid_bots ADD COLUMN ${col}`); } catch (e) { /* exists */ }
     }
@@ -840,6 +850,7 @@ export class GridBotDB {
       params.liquidation_price, params.params_json,
       params.virtual_enabled ?? 0,
       params.active_window_size ?? null,
+      params.grvt_sub_account_id ?? null,
     ];
     const sql = `
       INSERT INTO grid_bots (
@@ -848,8 +859,8 @@ export class GridBotDB {
         investment_usdt, original_investment_usdt, quantity_per_level,
         grid_profit_usdt, trend_pnl_usdt, total_pnl_usdt,
         status, position_size, avg_entry_price, liquidation_price, params_json,
-        virtual_enabled, active_window_size
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        virtual_enabled, active_window_size, grvt_sub_account_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     await this.dbRun(sql, values);
@@ -1927,6 +1938,139 @@ export class GridBotDB {
       `UPDATE grvt_credentials SET last_used_at = ? WHERE user_id = ?`,
       [Date.now(), userId]
     );
+  }
+
+  // ─── H.5: grvt_sub_accounts ────────────────────────────────────
+  // Multiple GRVT sub-accounts per user. The default credentials
+  // (grvt_credentials) stay; this table holds extras with a label.
+  // Bots reference a row here via grid_bots.grvt_sub_account_id.
+
+  async listGrvtSubAccounts(userId: number): Promise<Array<{
+    id: number;
+    user_id: number;
+    label: string;
+    is_default: number;
+    last_test_ok: number | null;
+    created_at: number;
+  }>> {
+    return await this.dbAll(
+      `SELECT id, user_id, label, is_default, last_test_ok, created_at
+         FROM grvt_sub_accounts
+        WHERE user_id = ?
+        ORDER BY is_default DESC, created_at ASC`,
+      [userId]
+    );
+  }
+
+  async getGrvtSubAccountRaw(id: number): Promise<{
+    id: number;
+    user_id: number;
+    label: string;
+    encrypted_api_key: string;        api_key_iv: string;        api_key_tag: string;
+    encrypted_api_secret: string;     api_secret_iv: string;     api_secret_tag: string;
+    encrypted_trading_address: string;trading_address_iv: string;trading_address_tag: string;
+    encrypted_account_id: string;     account_id_iv: string;     account_id_tag: string;
+    encrypted_sub_account_id: string; sub_account_id_iv: string; sub_account_id_tag: string;
+    is_default: number;
+    last_test_ok: number | null;
+    created_at: number;
+  } | null> {
+    return await this.dbGet(
+      `SELECT * FROM grvt_sub_accounts WHERE id = ?`,
+      [id]
+    );
+  }
+
+  async createGrvtSubAccount(params: {
+    user_id: number;
+    label: string;
+    encrypted_api_key: string;        api_key_iv: string;        api_key_tag: string;
+    encrypted_api_secret: string;     api_secret_iv: string;     api_secret_tag: string;
+    encrypted_trading_address: string;trading_address_iv: string;trading_address_tag: string;
+    encrypted_account_id: string;     account_id_iv: string;     account_id_tag: string;
+    encrypted_sub_account_id: string; sub_account_id_iv: string; sub_account_id_tag: string;
+    is_default: boolean;
+    last_test_ok: boolean;
+  }): Promise<number> {
+    const now = Date.now();
+    // If marked default, clear any other defaults for this user first.
+    // SQLite does not give us atomic "demote others + insert new" without
+    // an explicit transaction, so we run the demote then the insert. The
+    // race-with-itself surface is small (single user clicking twice fast)
+    // and any inconsistency is corrected by the next listGrvtSubAccounts
+    // call which orders by is_default DESC.
+    if (params.is_default) {
+      await this.dbRun(
+        `UPDATE grvt_sub_accounts SET is_default = 0 WHERE user_id = ?`,
+        [params.user_id]
+      );
+    }
+    const result = await this.dbRun(
+      `INSERT INTO grvt_sub_accounts (
+        user_id, label,
+        encrypted_api_key, api_key_iv, api_key_tag,
+        encrypted_api_secret, api_secret_iv, api_secret_tag,
+        encrypted_trading_address, trading_address_iv, trading_address_tag,
+        encrypted_account_id, account_id_iv, account_id_tag,
+        encrypted_sub_account_id, sub_account_id_iv, sub_account_id_tag,
+        is_default, last_test_ok, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        params.user_id, params.label,
+        params.encrypted_api_key, params.api_key_iv, params.api_key_tag,
+        params.encrypted_api_secret, params.api_secret_iv, params.api_secret_tag,
+        params.encrypted_trading_address, params.trading_address_iv, params.trading_address_tag,
+        params.encrypted_account_id, params.account_id_iv, params.account_id_tag,
+        params.encrypted_sub_account_id, params.sub_account_id_iv, params.sub_account_id_tag,
+        params.is_default ? 1 : 0,
+        params.last_test_ok ? 1 : 0,
+        now,
+      ]
+    );
+    return result.lastID;
+  }
+
+  async updateGrvtSubAccountMeta(
+    id: number,
+    userId: number,
+    patch: { label?: string; is_default?: boolean }
+  ): Promise<void> {
+    if (patch.is_default === true) {
+      // Demote any other default before promoting this row.
+      await this.dbRun(
+        `UPDATE grvt_sub_accounts SET is_default = 0
+          WHERE user_id = ? AND id != ?`,
+        [userId, id]
+      );
+    }
+    const sets: string[] = [];
+    const args: unknown[] = [];
+    if (patch.label !== undefined) { sets.push('label = ?'); args.push(patch.label); }
+    if (patch.is_default !== undefined) {
+      sets.push('is_default = ?');
+      args.push(patch.is_default ? 1 : 0);
+    }
+    if (sets.length === 0) return;
+    args.push(id, userId);
+    await this.dbRun(
+      `UPDATE grvt_sub_accounts SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`,
+      args
+    );
+  }
+
+  async deleteGrvtSubAccount(id: number, userId: number): Promise<void> {
+    await this.dbRun(
+      `DELETE FROM grvt_sub_accounts WHERE id = ? AND user_id = ?`,
+      [id, userId]
+    );
+  }
+
+  async countBotsUsingSubAccount(subAccountId: number): Promise<number> {
+    const row = await this.dbGet(
+      `SELECT COUNT(*) as c FROM grid_bots WHERE grvt_sub_account_id = ?`,
+      [subAccountId]
+    ) as { c: number } | undefined;
+    return row?.c ?? 0;
   }
 
   // ─── Multi-tenant: bot listing per user ────────────────────────

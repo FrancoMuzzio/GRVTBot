@@ -3,6 +3,7 @@ import { useAuth } from '@/lib/auth-context';
 import { Card } from '@/components/primitives/card';
 import { Button } from '@/components/primitives/button';
 import { Mono } from '@/components/primitives/mono';
+import { SubAccountsCard } from '@/components/sub-accounts-card';
 
 export function SettingsPage() {
   const { user, logout } = useAuth();
@@ -78,6 +79,9 @@ export function SettingsPage() {
           </div>
         )}
       </Card>
+
+      {/* H.5: GRVT Sub-Accounts (only useful once default creds exist) */}
+      {user?.hasGrvtCreds && <SubAccountsCard />}
 
       {/* Connection info */}
       <Card>

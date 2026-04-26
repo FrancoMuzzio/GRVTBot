@@ -40,6 +40,8 @@ export interface BotSummary {
   // H.8: virtual grids
   virtual_enabled?: 0 | 1;
   active_window_size?: number | null;
+  // H.5: optional sub-account this bot routes through. NULL = default creds.
+  grvt_sub_account_id?: number | null;
 }
 
 export interface GridLevel {
@@ -220,6 +222,17 @@ export interface ValidateBotInput {
   // H.8: Virtual grids
   virtual_enabled?: boolean;
   active_window_size?: number;
+  // H.5: optional sub-account routing. Null/missing = default creds.
+  grvt_sub_account_id?: number | null;
+}
+
+// H.5: GRVT sub-account row as the dashboard sees it (no encrypted fields).
+export interface GrvtSubAccount {
+  id: number;
+  label: string;
+  isDefault: boolean;
+  lastTestOk: boolean | null;
+  createdAt: number;
 }
 
 export interface ValidateBotResult {

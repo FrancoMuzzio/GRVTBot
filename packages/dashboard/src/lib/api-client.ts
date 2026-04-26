@@ -333,4 +333,48 @@ export const api = {
     request<{ ok: true }>('/auth/grvt-credentials', {
       method: 'DELETE',
     }),
+
+  // H.5: GRVT sub-accounts. The default credentials live elsewhere
+  // (saveGrvtCredentials above); these manage extras with a label.
+  listSubAccounts: () =>
+    request<Array<{
+      id: number;
+      label: string;
+      isDefault: boolean;
+      lastTestOk: boolean | null;
+      createdAt: number;
+    }>>('/auth/grvt-sub-accounts'),
+
+  createSubAccount: (body: {
+    label: string;
+    apiKey: string;
+    apiSecret: string;
+    tradingAddress: string;
+    accountId: string;
+    subAccountId: string;
+    isDefault?: boolean;
+  }) =>
+    request<{
+      id: number;
+      label: string;
+      isDefault: boolean;
+      equity: string | null;
+    }>('/auth/grvt-sub-accounts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateSubAccount: (
+    id: number,
+    body: { label?: string; isDefault?: boolean }
+  ) =>
+    request<{ ok: true }>(`/auth/grvt-sub-accounts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteSubAccount: (id: number) =>
+    request<{ ok: true }>(`/auth/grvt-sub-accounts/${id}`, {
+      method: 'DELETE',
+    }),
 };

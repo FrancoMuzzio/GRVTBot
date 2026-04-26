@@ -67,6 +67,8 @@ interface EngineOps {
     investmentUSDT: number;
     virtualEnabled?: boolean;
     activeWindowSize?: number;
+    // H.5: optional sub-account routing. NULL = use default creds.
+    grvtSubAccountId?: number | null;
   }): Promise<number>;
   startBot(botId: number): Promise<void>;
   pauseBot(botId: number): Promise<void>;
@@ -77,11 +79,12 @@ interface EngineOps {
     lowerPrice: number,
     upperPrice: number
   ): Promise<unknown>;
-  // C.3: invalidate the cached per-user GRVT client + refresh the
-  // injected client on every running bot owned by this user. Called
-  // after the user rotates their credentials so live bots pick up
-  // the new keys without a restart.
-  rebindGrvtClient?(userId: number): Promise<void>;
+  // C.3 + H.5: invalidate the cached GRVT client + refresh the injected
+  // client on every running bot. With subAccountId omitted the engine
+  // refreshes ALL bots owned by the user (default-creds rotation).
+  // With subAccountId provided it only refreshes bots routed through
+  // that specific sub-account.
+  rebindGrvtClient?(userId: number, subAccountId?: number | null): Promise<void>;
 }
 
 export interface V2RouterDeps {
@@ -655,6 +658,184 @@ export function createV2Router(deps: V2RouterDeps): Router {
     return;
   }));
 
+  // ─── H.5: GRVT sub-accounts ───────────────────────────────────────
+  // Power users can connect multiple GRVT sub-accounts (one row each in
+  // grvt_sub_accounts) so different bots run isolated risk-wise. The
+  // existing `/auth/grvt-credentials` flow handles their default; these
+  // routes manage the extras.
+
+  // ── GET /api/v2/auth/grvt-sub-accounts ────────────────────────────
+  // List the user's sub-accounts. NEVER returns encrypted blobs — only
+  // metadata safe to render in the dashboard.
+  router.get('/auth/grvt-sub-accounts', asyncHandler(async (req, res) => {
+    const userId = req.userId!;
+    const rows = await gridBotDb.listGrvtSubAccounts(userId);
+    res.json(
+      rows.map((r) => ({
+        id: r.id,
+        label: r.label,
+        isDefault: !!r.is_default,
+        lastTestOk: r.last_test_ok == null ? null : !!r.last_test_ok,
+        createdAt: r.created_at,
+      }))
+    );
+    return;
+  }));
+
+  // ── POST /api/v2/auth/grvt-sub-accounts ───────────────────────────
+  // Add a new sub-account for the authenticated user. Same validation
+  // and live login+balance test as the default-credentials flow above
+  // (lines 549-596) — we never persist credentials that GRVT itself
+  // refuses, so users hit the real error in the UI immediately instead
+  // of a confusing failure at first bot creation.
+  router.post('/auth/grvt-sub-accounts', asyncHandler(async (req, res) => {
+    const userId = req.userId!;
+    const body = (req.body ?? {}) as {
+      label?: unknown;
+      apiKey?: unknown;
+      apiSecret?: unknown;
+      tradingAddress?: unknown;
+      accountId?: unknown;
+      subAccountId?: unknown;
+      isDefault?: unknown;
+    };
+    const label = String(body.label ?? '').trim();
+    const apiKey = String(body.apiKey ?? '').trim();
+    const apiSecret = String(body.apiSecret ?? '').trim();
+    const tradingAddress = String(body.tradingAddress ?? '').trim();
+    const accountId = String(body.accountId ?? '').trim();
+    const subAccountId = String(body.subAccountId ?? '').trim();
+    const isDefault = body.isDefault === true;
+
+    const errors: string[] = [];
+    if (!label || label.length > 64) errors.push('label is required (max 64 chars)');
+    if (!apiKey) errors.push('apiKey is required');
+    if (!apiSecret) errors.push('apiSecret is required');
+    if (!/^0x[0-9a-fA-F]{64}$/.test(apiSecret)) {
+      errors.push('apiSecret must be a 0x-prefixed 32-byte hex string');
+    }
+    if (!tradingAddress || !/^0x[0-9a-fA-F]{40}$/.test(tradingAddress)) {
+      errors.push('tradingAddress must be a 0x-prefixed Ethereum address');
+    }
+    if (!accountId) errors.push('accountId is required');
+    if (!subAccountId) errors.push('subAccountId is required');
+    if (errors.length > 0) {
+      return res.status(400).json({ error: 'validation_failed', errors });
+    }
+
+    // Live test: the same login + getBalance round trip the default
+    // creds endpoint does. Only persist on success.
+    const plainCreds: GrvtClientCreds = {
+      apiKey, apiSecret, tradingAddress, accountId, subAccountId,
+    };
+    let testEquity: string | null = null;
+    try {
+      const testClient = new GRVTClient(plainCreds);
+      const loggedIn = await testClient.login();
+      if (!loggedIn) {
+        return res.status(400).json({
+          error: 'credential_test_failed',
+          stage: 'login',
+          message: 'GRVT login failed — check apiKey and apiSecret',
+        });
+      }
+      const balance = await testClient.getBalance() as { total_equity?: string };
+      testEquity = balance.total_equity ?? null;
+    } catch (testErr) {
+      const msg = (testErr as Error).message || 'unknown error';
+      log.warn({ userId, err: msg }, 'GRVT sub-account credential test failed');
+      return res.status(400).json({
+        error: 'credential_test_failed',
+        stage: 'account_summary',
+        message: `GRVT API call failed: ${msg}`,
+      });
+    }
+
+    try {
+      const encrypted = encryptCredentialFields({
+        apiKey, apiSecret, tradingAddress, accountId, subAccountId,
+      });
+      const id = await gridBotDb.createGrvtSubAccount({
+        user_id: userId,
+        label,
+        ...encrypted,
+        is_default: isDefault,
+        last_test_ok: true,
+      });
+      log.info({ userId, subAccountRowId: id, label }, 'GRVT sub-account created');
+      res.status(201).json({ id, label, isDefault, equity: testEquity });
+    } catch (err) {
+      log.error(
+        { userId, err: (err as Error).message },
+        'failed to save GRVT sub-account'
+      );
+      res.status(500).json({
+        error: 'save_failed',
+        message: (err as Error).message,
+      });
+    }
+    return;
+  }));
+
+  // ── PATCH /api/v2/auth/grvt-sub-accounts/:id ──────────────────────
+  // Edit the label or flip the default flag. Credential rotation is
+  // intentionally out of scope here — to rotate keys, delete + recreate
+  // (this avoids needing another live login test in the PATCH path).
+  router.patch('/auth/grvt-sub-accounts/:id', asyncHandler(async (req, res) => {
+    const userId = req.userId!;
+    const id = parseInt(String(req.params.id ?? ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' });
+    const sub = await gridBotDb.getGrvtSubAccountRaw(id);
+    if (!sub || sub.user_id !== userId) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    const body = (req.body ?? {}) as { label?: unknown; isDefault?: unknown };
+    const patch: { label?: string; is_default?: boolean } = {};
+    if (body.label !== undefined) {
+      const label = String(body.label ?? '').trim();
+      if (!label || label.length > 64) {
+        return res.status(400).json({ error: 'invalid_label' });
+      }
+      patch.label = label;
+    }
+    if (body.isDefault !== undefined) {
+      patch.is_default = body.isDefault === true;
+    }
+    if (patch.label === undefined && patch.is_default === undefined) {
+      return res.status(400).json({ error: 'nothing_to_update' });
+    }
+    await gridBotDb.updateGrvtSubAccountMeta(id, userId, patch);
+    log.info({ userId, subAccountRowId: id, patch }, 'GRVT sub-account updated');
+    res.json({ ok: true });
+    return;
+  }));
+
+  // ── DELETE /api/v2/auth/grvt-sub-accounts/:id ─────────────────────
+  // Refuses while any bot still references this sub-account. Forces the
+  // user to either move bots or close them before tearing the creds
+  // away — same protection the default-creds DELETE has.
+  router.delete('/auth/grvt-sub-accounts/:id', asyncHandler(async (req, res) => {
+    const userId = req.userId!;
+    const id = parseInt(String(req.params.id ?? ''), 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' });
+    const sub = await gridBotDb.getGrvtSubAccountRaw(id);
+    if (!sub || sub.user_id !== userId) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    const usedBy = await gridBotDb.countBotsUsingSubAccount(id);
+    if (usedBy > 0) {
+      return res.status(409).json({
+        error: 'has_active_bots',
+        message: `${usedBy} bot(s) still use this sub-account. Close or reassign them first.`,
+      });
+    }
+    await gridBotDb.deleteGrvtSubAccount(id, userId);
+    invalidateGrvtClient(userId, id);
+    log.info({ userId, subAccountRowId: id }, 'GRVT sub-account deleted');
+    res.json({ ok: true });
+    return;
+  }));
+
   // ── GET /api/v2/bots ──────────────────────────────────────────────
   // List all bots with the fields the dashboard cares about.
   router.get('/bots', asyncHandler(async (req, res) => {
@@ -670,7 +851,8 @@ export function createV2Router(deps: V2RouterDeps): Router {
              compound_pct, compound_threshold_usdt, compound_interval_hours,
              last_compound_at, total_reinvested, original_investment_usdt,
              quantity_per_level,
-             safeguard_enabled, safeguard_threshold_pct, safeguard_action
+             safeguard_enabled, safeguard_threshold_pct, safeguard_action,
+             grvt_sub_account_id
       FROM grid_bots
       WHERE COALESCE(user_id, 1) = ?
       ORDER BY created_at DESC
@@ -1439,6 +1621,8 @@ export function createV2Router(deps: V2RouterDeps): Router {
       safeguard_action: 'pause' | 'pause_close';
       virtual_enabled: boolean;
       active_window_size: number;
+      // H.5: optional sub-account routing. Null/missing = default creds.
+      grvt_sub_account_id: number | null;
     }>;
 
     const errors: string[] = [];
@@ -1497,19 +1681,47 @@ export function createV2Router(deps: V2RouterDeps): Router {
     try {
       const userId = req.userId!;
 
-      // C.9: reject if user already has an active bot on this pair.
-      // Fill attribution breaks silently when two bots share an
-      // instrument on the same sub-account.
+      // H.5: validate the sub-account FK if provided. The bot can only
+      // route through a row that belongs to this user — even with a
+      // crafted body, the engine would refuse at run time, but failing
+      // here gives the user a clean 400 instead of an opaque 500.
+      let grvtSubAccountId: number | null = null;
+      if (body.grvt_sub_account_id != null) {
+        const id = Number(body.grvt_sub_account_id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return res.status(400).json({
+            error: 'validation_failed',
+            errors: ['grvt_sub_account_id must be a positive integer'],
+          });
+        }
+        const sub = await gridBotDb.getGrvtSubAccountRaw(id);
+        if (!sub || sub.user_id !== userId) {
+          return res.status(400).json({
+            error: 'invalid_sub_account',
+            message: 'Sub-account not found',
+          });
+        }
+        grvtSubAccountId = id;
+      }
+
+      // C.9 + H.5: reject if the same (user, pair, sub-account) tuple
+      // already has an active bot. Same instrument on a DIFFERENT
+      // sub-account is allowed — that's the whole point of H.5.
+      // COALESCE folds NULL into a sentinel so the equality test works
+      // for both the default-creds path and explicit sub-accounts.
       const existing = await dbGet<{ c: number }>(
         db,
         `SELECT COUNT(*) as c FROM grid_bots
-         WHERE COALESCE(user_id, 1) = ? AND pair = ? AND status IN ('running', 'paused')`,
-        [userId, pair]
+         WHERE COALESCE(user_id, 1) = ?
+           AND pair = ?
+           AND COALESCE(grvt_sub_account_id, -1) = COALESCE(?, -1)
+           AND status IN ('running', 'paused')`,
+        [userId, pair, grvtSubAccountId]
       );
       if (existing && existing.c > 0) {
         return res.status(409).json({
           error: 'duplicate_instrument',
-          message: `You already have an active bot on ${pair}. Close or stop it before creating a new one.`,
+          message: `You already have an active bot on ${pair} for this sub-account. Close or stop it before creating a new one.`,
         });
       }
 
@@ -1524,6 +1736,7 @@ export function createV2Router(deps: V2RouterDeps): Router {
         investmentUSDT: investment,
         virtualEnabled,
         activeWindowSize: virtualEnabled ? activeWindowSize : undefined,
+        grvtSubAccountId,
       });
       log.info({ botId, userId, pair, direction, leverage, grids }, 'bot created (paused)');
 

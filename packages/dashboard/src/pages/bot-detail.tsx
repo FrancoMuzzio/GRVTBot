@@ -93,6 +93,15 @@ export function BotDetailPage() {
     refetchInterval: 60_000,
   });
 
+  // H.5: sub-account label resolution. We share the cache key with
+  // Settings + the create-bot wizard so this is normally a cache hit.
+  const subAccountsQuery = useQuery({
+    queryKey: ['sub-accounts'],
+    queryFn: () => api.listSubAccounts(),
+    enabled: !!botQuery.data?.bot.grvt_sub_account_id,
+    staleTime: 60_000,
+  });
+
   // Live tick from WS — overrides the REST snapshot when present.
   const [tick, setTick] = useState<BotTick | null>(null);
   useWsChannel<BotTick>(`bot:${botId}`, (msg) => {
@@ -375,6 +384,13 @@ export function BotDetailPage() {
           <span className="text-sm text-text-muted">
             {bot.pair} · {bot.direction.toUpperCase()} · {bot.leverage}x
           </span>
+          {bot.grvt_sub_account_id != null && (
+            <span className="text-2xs uppercase tracking-wider text-primary border border-primary/40 rounded-md px-2 py-0.5">
+              {subAccountsQuery.data?.find(
+                (s) => s.id === bot.grvt_sub_account_id
+              )?.label ?? `Sub #${bot.grvt_sub_account_id}`}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button

@@ -55,6 +55,8 @@ interface WizardState {
   autoShiftPct: string;
   virtualEnabled: boolean;
   activeWindowSize: string;
+  // H.5: '' = use default credentials. Otherwise = sub-account row id (as string for <select>).
+  subAccountId: string;
 }
 
 const INITIAL_STATE: WizardState = {
@@ -76,6 +78,7 @@ const INITIAL_STATE: WizardState = {
   autoShiftPct: '10',
   virtualEnabled: false,
   activeWindowSize: '70',
+  subAccountId: '',
 };
 
 // H.1: hardcoded fallback — used while the API query is loading
@@ -100,6 +103,15 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
     staleTime: 60_000,
     enabled: open,
   });
+  // H.5: load sub-accounts so the wizard can offer routing. The dropdown
+  // is only rendered when subs.length > 0 — single-account users see no
+  // change to the existing flow.
+  const subAccountsQuery = useQuery({
+    queryKey: ['sub-accounts'],
+    queryFn: () => api.listSubAccounts(),
+    enabled: open,
+  });
+  const subAccounts = subAccountsQuery.data ?? [];
   const PAIRS = instrumentsQuery.data?.instruments
     ? (instrumentsQuery.data.instruments as any[])
         .filter((i: any) => i.instrument?.includes('_Perp') || i.symbol?.includes('_Perp'))
@@ -170,6 +182,11 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
           active_window_size: Math.min(80, Math.max(20, parseInt(state.activeWindowSize || '70', 10))),
         }
       : {};
+    // H.5: thread the picked sub-account through to POST /bots. Empty
+    // string in state.subAccountId = use the user's default credentials.
+    const subAccountPayload = state.subAccountId
+      ? { grvt_sub_account_id: parseInt(state.subAccountId, 10) }
+      : {};
     createMutation.mutate({
       pair: validated.pair,
       direction: validated.direction,
@@ -184,6 +201,7 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
       ...(tpPct > 0 ? { tp_pct: tpPct } : {}),
       ...autoShiftPayload,
       ...virtualPayload,
+      ...subAccountPayload,
     } as any);
   }
 
@@ -202,7 +220,8 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
       key !== 'slPct' &&
       key !== 'tpPct' &&
       key !== 'autoShiftEnabled' &&
-      key !== 'autoShiftPct'
+      key !== 'autoShiftPct' &&
+      key !== 'subAccountId'
     ) {
       setValidated(null);
     }
@@ -297,7 +316,14 @@ export function CreateBotWizard({ open, onClose }: CreateBotWizardProps) {
     >
       <Stepper step={step} />
       <div className="mt-6">
-        {step === 0 && <StepPair state={state} update={update} pairs={PAIRS} />}
+        {step === 0 && (
+          <StepPair
+            state={state}
+            update={update}
+            pairs={PAIRS}
+            subAccounts={subAccounts}
+          />
+        )}
         {step === 1 && <StepRange state={state} update={update} />}
         {step === 2 && <StepConfig state={state} update={update} />}
         {step === 3 && (
@@ -358,10 +384,12 @@ function StepPair({
   state,
   update,
   pairs,
+  subAccounts,
 }: {
   state: WizardState;
   update: <K extends keyof WizardState>(k: K, v: WizardState[K]) => void;
   pairs: Array<{ value: string; label: string }>;
+  subAccounts: Array<{ id: number; label: string; isDefault: boolean }>;
 }) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
@@ -375,6 +403,33 @@ function StepPair({
 
   return (
     <div>
+      {/* H.5: only show the picker when the user has at least one sub-account.
+          Otherwise the bot routes through default credentials and the UI is
+          identical to the pre-H.5 wizard. */}
+      {subAccounts.length > 0 && (
+        <div className="mb-5">
+          <h3 className="text-sm font-semibold text-text-primary mb-2">
+            Sub-account
+          </h3>
+          <select
+            value={state.subAccountId}
+            onChange={(e) => update('subAccountId', e.target.value)}
+            className="w-full h-10 rounded-md border border-border-subtle bg-bg-surface px-3 text-sm text-text-primary"
+          >
+            <option value="">Default credentials</option>
+            {subAccounts.map((s) => (
+              <option key={s.id} value={String(s.id)}>
+                {s.label}
+                {s.isDefault ? ' (Default)' : ''}
+              </option>
+            ))}
+          </select>
+          <p className="text-2xs text-text-muted mt-1">
+            Bot will trade against the selected GRVT sub-account.
+          </p>
+        </div>
+      )}
+
       <h3 className="text-sm font-semibold text-text-primary mb-3">
         Select instrument
       </h3>
