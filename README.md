@@ -86,8 +86,9 @@ months. Issues + PRs welcome.
 
 ## Contributing
 
-Run `npm test` from the root — currently 208 tests across bot,
-dashboard, and notifier packages. PRs that add features should include
+Run `npm test` from the root — currently 210 tests across bot,
+dashboard, and notifier packages. The suite is self-contained: it does
+not need a populated `.env`. PRs that add features should include
 tests; PRs that fix bugs should include a regression test.
 
 ## License

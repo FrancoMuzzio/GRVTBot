@@ -1,7 +1,7 @@
 # GRVT Grid — Roadmap
 
-> **Last updated**: 2026-04-25
-> **Current state**: Phases A-H complete. Bots running in production (ETH 10x + SOL virtual grids 10x). Phase I (Lumina) paused.
+> **Last updated**: 2026-06-11
+> **Current state**: Phases A-H complete (including D test remainders, H.5/H.6/H.7). Repo public under AGPL; hosted instance at grvtbot.com. Phase I (Lumina) paused.
 
 ---
 
@@ -16,9 +16,11 @@ Full SPA (Vite + React + Tailwind + shadcn). GridChart with candle + grid overla
 ### Phase C — Hardening & Reliability ✅
 All 10/10 deployed. Structured logging (pino), per-user GRVT clients, liquidation safeguard, graceful shutdown, deep health check, pagination, processedFills pruning, one-bot-per-instrument guard, notifier health.
 
-### Phase D — Test Suite (partial)
-- D.2 + D.3 deployed (58 tests covering REST API + grid calculation).
-- D.1, D.4-D.9 still pending (see below).
+### Phase D — Test Suite ✅
+- D.2 + D.3 first (58 tests covering REST API + grid calculation).
+- D.1/D.4/D.5/D.6/D.9 shipped 2026-05-03 (+47 tests: bot lifecycle, compound, range update, migrations, WS).
+- D.7/D.8 shipped 2026-05-12 (+83 tests: notifier + dashboard infrastructure).
+- 2026-06-11: suite is self-contained — `npm test` passes without a populated `.env` (env vars now set at module level in `tests/setup.ts`). 210 tests across the three packages.
 
 ### Phase E — Dashboard Polish ✅
 E.1-E.9 done. E.9 (password recovery) ships SMTP-based reset with optional config — if SMTP env vars are blank, reset URL is logged at WARN for out-of-band delivery so self-host without SMTP still works.
@@ -47,48 +49,33 @@ All 6/6 deployed: Prometheus metrics, Grafana template, automated backups, rollb
 
 ---
 
-## Pending
+### Phase H (next-gen) ✅
+- **H.5 — Multi-sub-account**: connect multiple GRVT sub-accounts, run bots on each; `rebindGrvtClient(userId, subAccountId)` refreshes clients per sub-account.
+- **H.6 — Backtesting** (2026-05-03): grid simulation on historical candles, fee modeling, backtest UI page + "Apply to wizard".
+- **H.7 — Portfolio view**: `/portfolio` aggregate endpoint (equity, realized/unrealized PnL, weighted leverage, per-pair exposure) feeding the overview page.
 
-### Phase D (remaining)
-| # | Task | Scope | Est |
-|---|------|-------|-----|
-| D.1 | Bot lifecycle integration test | `tests/integration/` | 2h |
-| D.4 | Compound rebalance tests | `tests/grid-engine.test.ts` | 1h |
-| D.5 | Range update tests | `tests/range-update.test.ts` | 2h |
-| D.6 | DB migration tests | `tests/db.test.ts` | 1h |
-| D.7 | Notifier tests | `packages/notifier/tests/` | 1h |
-| D.8 | Dashboard component tests | `packages/dashboard/tests/` | 2h |
-| D.9 | WebSocket tests | `tests/ws.test.ts` | 1h |
+### Public release (2026-05-26)
+AGPL-3.0 license, security docs + TOS v3, bilingual ES/EN dashboard. Pre-launch security pass fixed 8 critical/high issues (C-1..C-4, H-5..H-8); 2026-05-28 advisories disclosed (dashboard key + close bug). Hosted instance at grvtbot.com.
 
-### Phase H (next-gen, all new)
-| # | Task | Why | Est |
-|---|------|-----|-----|
-| H.5 | **Multi-sub-account** — connect multiple GRVT sub-accounts, run bots on each | Power-user isolation between strategies | 3h |
-| H.6 | **Backtesting** — simulate grid on historical candles | Test parameters before risking capital | 8h |
-| H.7 | **Portfolio view** — aggregate equity / PnL / risk across all bots | Overview lacks aggregate stats | 3h |
-
-### Phase I — Lumina Insurance Integration (paused)
-Plan exists at `~/.claude/plans/effervescent-sparking-lamport.md`. Deferred until Lumina vaults have non-zero TVL and/or a GRVT-specific product exists. Flash Insurance economics don't close yet for small-capital bots at low leverage.
+### Maintenance (2026-06-11)
+- **Daily snapshot fix**: `createDailySnapshot` named legacy-only columns (`timestamp`, `*_usdt` mirrors) in its INSERT, so every nightly snapshot failed with SQLITE_ERROR on fresh-schema installs and the equity curve stayed empty. Now probes the table once and writes the column set it actually has (legacy DBs keep the dual write). Regression tests cover both schema generations.
+- **Test suite self-contained**: env vars moved from `beforeAll` to module level in `tests/setup.ts` + `JWT_SECRET` added — `npm test` no longer depends on a populated `.env`.
+- **.gitignore**: `**/data/master.key` ignored (Docker layouts keep the key under `./data/`).
+- **Docker**: native modules rebuilt from source against the image's glibc; notifier healthcheck uses `node` (image has no curl); nested workspace deps overlaid in the notifier runtime image.
 
 ---
 
-## Priority order (recommended next)
+## Pending
 
-```
-1. H.5 — Multi-sub-account       (~3h, schema ready)
-2. H.7 — Portfolio view          (~3h, lifts overview UX)
-3. D remainders                  (~10h, test coverage)
-4. H.6 — Backtesting             (~8h, big feature)
-```
+### Phase I — Lumina Insurance Integration (paused)
+Plan exists at `~/.claude/plans/effervescent-sparking-lamport.md`. Deferred until Lumina vaults have non-zero TVL and/or a GRVT-specific product exists. Flash Insurance economics don't close yet for small-capital bots at low leverage.
 
 Phase I (Lumina) waits for protocol maturity. No work scheduled.
 
 ---
 
-## Production state (Apr 25)
+## Production state (Jun 11)
 
-- **Bot 44**: ETH_USDT_Perp · LONG · 10x · 94 grids · realized $53+ · running
-- **Bot 48**: SOL_USDT_Perp · LONG · 10x · 120 virtual grids (window 70) · $100 invested · running
-- **Hosting**: self-managed VPS behind Caddy reverse proxy + Let's Encrypt TLS
-- **DB**: SQLite WAL stored under the bot package's `data/` dir (`$GRID_BOT_DB`)
-- Services: systemd units `grvt-grid-bot.service` + `grvt-grid-notifier.service` running as a dedicated unprivileged user
+- **Hosted instance**: grvtbot.com — Docker Compose (`grvt-grid-bot` + `grvt-grid-notifier`) behind Caddy reverse proxy.
+- **DB**: SQLite WAL at `./data/grid_bot.db`, mounted into the bot container; master key at `./data/master.key` (0600).
+- Self-host path documented in `docs/INSTALL.md` (systemd or Docker).
