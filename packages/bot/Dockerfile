@@ -27,6 +27,11 @@ COPY packages/bot/tsconfig.json packages/bot/
 
 RUN npm ci --workspace=@grvt-grid/bot --include-workspace-root
 
+# Recompile native modules from source so they link against THIS image's
+# glibc (bookworm = 2.36), not a downloaded prebuilt binary that may require
+# a newer glibc (e.g. 2.38) and fail to load in the runtime stage.
+RUN npm rebuild sqlite3 better-sqlite3 --build-from-source
+
 # Now copy the source and build
 COPY packages/bot/src packages/bot/src
 COPY packages/bot/tests packages/bot/tests

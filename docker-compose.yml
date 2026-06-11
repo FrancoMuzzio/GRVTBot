@@ -75,7 +75,9 @@ services:
       bot:
         condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3849/"]
+      # The notifier image has no curl (unlike the bot image), so use node,
+      # which is always present, to probe the health endpoint.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3849/',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
